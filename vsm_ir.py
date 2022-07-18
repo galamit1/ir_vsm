@@ -104,7 +104,7 @@ class IR(object):
                   "document_reference": self.document_reference_length}
 
         with open(INVERTED_INDEX_PATH, "w") as inverted_index_file:
-            json.dump(corpus, inverted_index_file)
+            json.dump(corpus, inverted_index_file, indent=4)
 
     ### PART 2: Information Retrieval given a query. ###
 
@@ -119,9 +119,64 @@ class IR(object):
         query = self.tokenizer.tokenize(query.lower())  # tokens
         return [self.ps.stem(word) for word in query if word not in self.stop_words]  # stopwords + stem
 
-    def perform_query(self, ranking_func, index_path, query):
+    def perform_query(self, ranking_func, index_path, query): #TODO add bm25 support
         self.load_ir(index_path)
         query = self.normalize_query(query)
+        query_tf_idf = self.calculate_query_tf_idf(query)
+
+        relevant_docs = self.get_ranking(query_tf_idf)
+
+        with open(OUTPUT_PATH, "w") as f:
+            for i in range(0, len(relevant_docs)):
+                if relevant_docs[i][1] >= 0.075:
+                    f.write(relevant_docs[i][0] + "\n")
+
+    # Create hashmap of dj * q for all documents that include words from query
+    def documents_vectors_for_cossim(self, query_map):
+        documents_vectors = {}
+        for token in query_map:
+            if self.dict_tf_idf_scores.get(token):
+                for doc in self.dict_tf_idf_scores[token]:
+                    if doc not in documents_vectors:
+                        documents_vectors[doc] = 0
+
+                    documents_vectors[doc] += (self.dict_tf_idf_scores[token][doc]["tf_idf"] * query_map[token])
+
+        return documents_vectors
+
+    # Create sorted list of relevant documents by cosSim
+    def get_ranking(self, query_map):
+        results = []
+
+        # Calc query vector length
+        query_length = 0
+        for token in query_map:
+            query_length += (query_map[token] * query_map[token])
+        query_length = np.sqrt(query_length)
+
+        documents_vectors = self.documents_vectors_for_cossim(query_map)
+        for doc in documents_vectors:
+            doc_query_product = documents_vectors[doc]
+            doc_length = self.document_reference_length[doc]
+            cosSim = doc_query_product / (doc_length * query_length)
+            results.append((doc, cosSim))
+
+        # Sort list by cosSim
+        results.sort(key=lambda x: x[1], reverse=1)
+        return results
+
+    # Calculate query's tf-idf score.
+    def calculate_query_tf_idf(self, query):
+        query_length = len(query)
+        number_of_docs = len(self.document_reference_length)
+        query_tf_idf = {}
+        for word in set(query):
+            tf = (query.count(word) / query_length)
+            n_word = len(self.dict_tf_idf_scores.get(word, {})) # the number of documents with this word
+            idf = np.log2(((number_of_docs - n_word + 0.5) / (n_word + 0.5)) + 1) \
+                if self.dict_tf_idf_scores.get(word) else 0
+            query_tf_idf[str(word)] = tf * idf
+        return query_tf_idf
 
 
 def main():
