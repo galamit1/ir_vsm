@@ -22,21 +22,11 @@ class IR(object):
         # inverted index
         self.dict_tf_idf_scores = {}
         self.words_per_file = {}
-        self.query_dictionary = {}
-        self.document_reference_length = {}
+        self.max_appearance_per_file = {}
+        self.squared_document_tf_idf_length = {}  # the sum of all the tf-idf ** 2 scores for each word in the file
         self.corpus = {}
 
         # nltk classes
-        try:
-            nltk.download('stopwords')
-        except:  # disable SSL check. reference: https://stackoverflow.com/questions/38916452/nltk-download-ssl-certificate-verify-failed
-            try:
-                _create_unverified_https_context = ssl._create_unverified_context
-            except AttributeError:
-                pass
-            else:
-                ssl._create_default_https_context = _create_unverified_https_context
-            nltk.download('stopwords')
         self.stop_words = set(stopwords.words("english"))
         self.tokenizer = RegexpTokenizer(r'\w+')
         self.ps = PorterStemmer()
@@ -55,21 +45,33 @@ class IR(object):
                     text += str(entry.text) + " "
                 if entry.tag == "RECORDNUM":
                     record_id = int(entry.text)
-                    if record_id not in self.document_reference_length:
-                        self.document_reference_length[record_id] = 0
+                    if record_id not in self.squared_document_tf_idf_length:
+                        self.squared_document_tf_idf_length[record_id] = 0
 
+            self.words_per_file[record_id] = len(text) # TODO check if it's for the whole text
             text = self.tokenizer.tokenize(text.lower())  # tokens
             filtered_text = [self.ps.stem(word) for word in text if word not in self.stop_words]  # stopwords + stem
 
             self.update_dictionary(filtered_text, record_id)
-            self.words_per_file[record_id] = len(text)
+            self.calculate_max_appearances(record_id)
 
     def update_dictionary(self, text, file_name):
         for word in text:
-            if self.dict_tf_idf_scores.get(word, {}).get(file_name):
-                self.dict_tf_idf_scores[word][file_name]["count"] += 1
+            if not self.dict_tf_idf_scores.get(word):
+                self.dict_tf_idf_scores[word] = {}
+                self.dict_tf_idf_scores[word][file_name] = {"count": 1, "tf_idf": 0}
             else:
-                self.dict_tf_idf_scores[word] = {file_name: {"count": 1, "tf_idf": 0}}
+                if self.dict_tf_idf_scores.get(word, {}).get(file_name):
+                    self.dict_tf_idf_scores[word][file_name]["count"] += 1
+                else:
+                    self.dict_tf_idf_scores[word][file_name] = {"count": 1, "tf_idf": 0}
+
+    def calculate_max_appearances(self, file_name):
+        self.max_appearance_per_file[file_name] = 0
+        for word_map in self.dict_tf_idf_scores.values():
+            count = word_map.get(file_name, {}).get("count", 0)
+            if count > self.max_appearance_per_file[file_name]:
+                self.max_appearance_per_file[file_name] = count
 
     def calc_tf_idf_score(self, docs_count, avgdl):
         for word in self.dict_tf_idf_scores:
@@ -77,10 +79,10 @@ class IR(object):
                 word_frequency = self.dict_tf_idf_scores[word][file].get('count')
 
                 # compute tf_idf
-                tf = word_frequency / self.words_per_file.get(file)
+                tf = word_frequency / self.max_appearance_per_file.get(file) # TODO check if we want self.words_per_file.get(file)
                 idf = np.log2(docs_count / len(self.dict_tf_idf_scores[word]))
                 self.dict_tf_idf_scores[word][file]["tf_idf"] = tf * idf
-                self.document_reference_length[file] += (tf * idf) ** 2
+                self.squared_document_tf_idf_length[file] += (tf * idf) ** 2
 
                 # compute bm25
                 bm25 = (idf * word_frequency * (self.K + 1)) / \
@@ -91,17 +93,17 @@ class IR(object):
         [self.parse_file(xml_dir_path + "/" + file_name) if file_name.endswith(".xml") else None for file_name in
          os.listdir(xml_dir_path)]
 
-        amount_of_docs = len(self.document_reference_length)
+        amount_of_docs = len(self.squared_document_tf_idf_length)
         avgdl = sum(self.words_per_file.values()) / amount_of_docs
         self.calc_tf_idf_score(amount_of_docs, avgdl)
 
         # norm
-        for file in self.document_reference_length:
-            self.document_reference_length[file] = np.sqrt(self.document_reference_length[file])
+        for file in self.squared_document_tf_idf_length:
+            self.squared_document_tf_idf_length[file] = np.sqrt(self.squared_document_tf_idf_length[file])
 
         # add new dict to corpus
         corpus = {"dictionary": self.dict_tf_idf_scores,
-                  "document_reference": self.document_reference_length}
+                  "document_reference": self.squared_document_tf_idf_length}
 
         with open(INVERTED_INDEX_PATH, "w") as inverted_index_file:
             json.dump(corpus, inverted_index_file, indent=4)
@@ -113,7 +115,7 @@ class IR(object):
             corpus = json.load(inverted_index_file)
 
         self.dict_tf_idf_scores = corpus["dictionary"]
-        self.document_reference_length = corpus["document_reference"]
+        self.squared_document_tf_idf_length = corpus["document_reference"]
 
     def normalize_query(self, query):
         query = self.tokenizer.tokenize(query.lower())  # tokens
@@ -132,15 +134,15 @@ class IR(object):
                     f.write(relevant_docs[i][0] + "\n")
 
     # Create hashmap of dj * q for all documents that include words from query
-    def documents_vectors_for_cossim(self, query_map):
+    def get_documents_cossim_scores(self, query_map):
         documents_vectors = {}
-        for token in query_map:
-            if self.dict_tf_idf_scores.get(token):
-                for doc in self.dict_tf_idf_scores[token]:
+        for word in query_map:
+            if self.dict_tf_idf_scores.get(word):
+                for doc in self.dict_tf_idf_scores[word]:
                     if doc not in documents_vectors:
                         documents_vectors[doc] = 0
 
-                    documents_vectors[doc] += (self.dict_tf_idf_scores[token][doc]["tf_idf"] * query_map[token])
+                    documents_vectors[doc] += (self.dict_tf_idf_scores[word][doc]["tf_idf"] * query_map[word])
 
         return documents_vectors
 
@@ -151,13 +153,13 @@ class IR(object):
         # Calc query vector length
         query_length = 0
         for token in query_map:
-            query_length += (query_map[token] * query_map[token])
+            query_length += (query_map[token] ** 2)
         query_length = np.sqrt(query_length)
 
-        documents_vectors = self.documents_vectors_for_cossim(query_map)
-        for doc in documents_vectors:
-            doc_query_product = documents_vectors[doc]
-            doc_length = self.document_reference_length[doc]
+        documents_scores = self.get_documents_cossim_scores(query_map)
+        for doc in documents_scores:
+            doc_query_product = documents_scores[doc]
+            doc_length = np.sqrt(self.squared_document_tf_idf_length[doc])  # TODO we added the sqrt
             cosSim = doc_query_product / (doc_length * query_length)
             results.append((doc, cosSim))
 
@@ -167,14 +169,16 @@ class IR(object):
 
     # Calculate query's tf-idf score.
     def calculate_query_tf_idf(self, query):
-        query_length = len(query)
-        number_of_docs = len(self.document_reference_length)
+        number_of_docs = len(self.squared_document_tf_idf_length)
         query_tf_idf = {}
+        max_word_count = max([query.count(word) for word in query])
         for word in set(query):
-            tf = (query.count(word) / query_length)
-            n_word = len(self.dict_tf_idf_scores.get(word, {})) # the number of documents with this word
-            idf = np.log2(((number_of_docs - n_word + 0.5) / (n_word + 0.5)) + 1) \
+            tf = (query.count(word) / max_word_count) # TODO query_length = len(query)?
+            n_word = len(self.dict_tf_idf_scores.get(word, {}))  # the number of documents with this word
+            # TODO this is the BM25 idf
+            bm_25_idf = np.log2(((number_of_docs - n_word + 0.5) / (n_word + 0.5)) + 1) \
                 if self.dict_tf_idf_scores.get(word) else 0
+            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores[word])) # number of docs / number of docs the word in
             query_tf_idf[str(word)] = tf * idf
         return query_tf_idf
 
@@ -192,4 +196,14 @@ def main():
 
 
 if __name__ == '__main__':
+    try:
+        nltk.download('stopwords')
+    except:  # disable SSL check. reference: https://stackoverflow.com/questions/38916452/nltk-download-ssl-certificate-verify-failed
+        try:
+            _create_unverified_https_context = ssl._create_unverified_context
+        except AttributeError:
+            pass
+        else:
+            ssl._create_default_https_context = _create_unverified_https_context
+        nltk.download('stopwords')
     main()
