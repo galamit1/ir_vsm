@@ -38,9 +38,13 @@ class IR(object):
         self.tokenizer = RegexpTokenizer(r'\w+')
         self.ps = PorterStemmer()
 
-    # part 1: calculate tf-idf scores
+    ### PART 1: Calculate tf-idf scores ###
 
     def parse_file(self, filename):
+        """
+        extract the relevant words from the file, perform tokenizing, stemming and remove stop words.
+        save the data into the relevant dicts that will be saved in the inverted index.
+        """
         xml_tree = ET.parse(filename)
         root = xml_tree.getroot()
 
@@ -55,7 +59,7 @@ class IR(object):
                     if record_id not in self.squared_document_tf_idf_length:
                         self.squared_document_tf_idf_length[record_id] = 0
 
-            self.words_per_file[record_id] = len(text)  # TODO check if it's for the whole text
+            self.words_per_file[record_id] = len(text)
             text = self.tokenizer.tokenize(text.lower())  # tokens
             filtered_text = [self.ps.stem(word) for word in text if word not in self.stop_words]  # stopwords + stem
 
@@ -63,6 +67,10 @@ class IR(object):
             self.calculate_max_appearances(record_id)
 
     def update_dictionary_count(self, text, file_name):
+        """
+        update the count field in the inverted index.
+        at the end we will have for each word - number of appearance in every file.
+        """
         for word in text:
             if not self.dict_tf_idf_scores.get(word):
                 self.dict_tf_idf_scores[word] = {}
@@ -74,24 +82,35 @@ class IR(object):
                     self.dict_tf_idf_scores[word][file_name] = {COUNT: 1}
 
     def calculate_max_appearances(self, file_name):
+        """
+        create a dictionary that will be saved in the inverted index that contains for each file, the max appearance number for word.
+        it will be used in the calculation of tfidf scores.
+        """
         for word_map in self.dict_tf_idf_scores.values():
             count = word_map.get(file_name, {}).get(COUNT, 0)
             if count > self.max_appearance_per_file[file_name]:
                 self.max_appearance_per_file[file_name] = count
 
     def calc_tf_idf_score(self):
+        """
+        calculate the tfidf score for each word, for every file.
+        we will use it in the cossim calculation when performing the query.
+        """
         docs_number = len(self.squared_document_tf_idf_length)
         for word in self.dict_tf_idf_scores:
             for file in self.dict_tf_idf_scores[word]:
                 word_frequency = self.dict_tf_idf_scores[word][file].get(COUNT)
 
                 # compute tf_idf
-                tf = word_frequency / self.max_appearance_per_file[file] # TODO check if we want self.words_per_file.get(file)
+                tf = word_frequency / self.max_appearance_per_file[file]
                 idf = np.log2(docs_number / len(self.dict_tf_idf_scores[word]))
                 self.dict_tf_idf_scores[word][file][TFIDF] = tf * idf
                 self.squared_document_tf_idf_length[file] += (tf * idf) ** 2
 
     def create_mapping(self, xml_dir_path):
+        """
+        the main function of creating the index that calculates the relevant dictionaries and save it in the inverted index path.
+        """
         [self.parse_file(xml_dir_path + "/" + file_name) if file_name.endswith(".xml") else None for file_name in
          os.listdir(xml_dir_path)]
 
@@ -113,6 +132,9 @@ class IR(object):
     ### PART 2: Information Retrieval given a query. ###
 
     def load_ir(self, index_path):
+        """
+        loads the dictionaries from the inverted index in the given path.
+        """
         with open(index_path, "r") as inverted_index_file:
             corpus = json.load(inverted_index_file)
 
@@ -122,26 +144,16 @@ class IR(object):
         self.max_appearance_per_file = corpus["max_appearance_per_file"]
 
     def normalize_query(self, query):
+        """
+        normalize the given query by tokenizing, stemming and stop words removal.
+        """
         query = self.tokenizer.tokenize(query.lower())  # tokens
         return [self.ps.stem(word) for word in query if word not in self.stop_words]  # stopwords + stem
 
-    def perform_query(self, ranking_func, index_path, query):
-        self.load_ir(index_path)
-        query = self.normalize_query(query)
-        if ranking_func == TFIDF:
-            relevant_docs = self.get_tfidf_ranking(query)
-        elif ranking_func == BM25:
-            relevant_docs = self.get_bm25_ranking(query)
-        else:
-            raise("Invalid ranking function: " + ranking_func)
-
-        with open(OUTPUT_PATH, "w") as f:
-            for i in range(0, len(relevant_docs)):
-                if relevant_docs[i][1] >= 0.075:
-                    f.write(relevant_docs[i][0] + "\n")
-
-    # Create hashmap of dj * q for all documents that include words from query
     def get_documents_cossim_scores(self, query_map):
+        """
+        perform the cossim calculation, return a dict of dj * q for all documents that include words from query.
+        """
         documents_vectors = {}
         for word in query_map:
             if self.dict_tf_idf_scores.get(word):
@@ -152,8 +164,10 @@ class IR(object):
 
         return documents_vectors
 
-    # Create sorted list of relevant documents by cosSim
     def get_tfidf_ranking(self, query):
+        """
+        calculate the query tfidf and create sorted list of relevant documents by the cosSim score.
+        """
         query_map = self.calculate_query_tf_idf(query)
         results = []
 
@@ -174,21 +188,27 @@ class IR(object):
         results.sort(key=lambda x: x[1], reverse=1)
         return results
 
-    # Calculate query's tf-idf score.
     def calculate_query_tf_idf(self, query):
+        """
+        calculate the tfidf score for each word in the query.
+        """
         number_of_docs = len(self.squared_document_tf_idf_length)
         query_tf_idf = defaultdict(int)
         max_word_count = max([query.count(word) for word in query])
         for word in set(query):
             if word not in self.dict_tf_idf_scores:
                 continue
-            tf = (query.count(word) / max_word_count)  # TODO query_length = len(query)?
-            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores.get(word))) # number of docs / number of docs the word in
+            tf = (query.count(word) / max_word_count)
+            idf = np.log2(
+                number_of_docs / len(self.dict_tf_idf_scores.get(word)))  # number of docs / number of docs the word in
             query_tf_idf[str(word)] = tf * idf
         return query_tf_idf
 
     # Calculate query's bm25 score.
     def get_bm25_ranking(self, query):
+        """
+        calculate the documents bm25 scores using the query and create sorted list of the documents by the scores.
+        """
         number_of_docs = len(self.squared_document_tf_idf_length)
         avgdl = sum(self.words_per_file.values()) / number_of_docs
 
@@ -201,16 +221,35 @@ class IR(object):
             for doc in self.dict_tf_idf_scores.get(word, {}).keys():
                 word_frequency = self.dict_tf_idf_scores[word][doc][COUNT]
                 bm25_score_for_word = (bm25_idf * word_frequency * (self.K + 1)) / \
-                       (word_frequency + self.K * (1 - self.B + self.B * self.words_per_file[doc] / avgdl))
+                                      (word_frequency + self.K * (
+                                              1 - self.B + self.B * self.words_per_file[doc] / avgdl))
                 documents_scores[doc] += bm25_score_for_word
 
         results = list(documents_scores.items())
         results.sort(key=lambda x: x[1], reverse=1)
         return results
 
+    def perform_query(self, ranking_func, index_path, query):
+        """
+        write to the output path the results of the query with the given ranking function.
+        """
+        self.load_ir(index_path)
+        query = self.normalize_query(query)
+        if ranking_func == TFIDF:
+            relevant_docs = self.get_tfidf_ranking(query)
+        elif ranking_func == BM25:
+            relevant_docs = self.get_bm25_ranking(query)
+        else:
+            raise ("Invalid ranking function: " + ranking_func)
+
+        with open(OUTPUT_PATH, "w") as f:
+            for i in range(0, len(relevant_docs)):
+                if relevant_docs[i][1] >= 0.075:
+                    f.write(relevant_docs[i][0] + "\n")
+
 
 def main():
-    # call methods based on system arguments
+    # call methods based on the system arguments
     ir = IR()
     try:
         if sys.argv[1] == 'create_index':
