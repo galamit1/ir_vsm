@@ -1,16 +1,22 @@
+import nltk
 from nltk.tokenize import RegexpTokenizer
 from nltk.stem import PorterStemmer
-import xml.etree.ElementTree as ET
 from nltk.corpus import stopwords
+
+import xml.etree.ElementTree as ET
 import numpy as np
-import nltk
 import json
 import sys
 import os
 import ssl
+from collections import defaultdict
 
 INVERTED_INDEX_PATH = "vsm_inverted_index.json"
 OUTPUT_PATH = "ranked_query_docs.txt"
+
+COUNT = "count"
+TFIDF = "tfidf"
+BM25 = "bm25"
 
 
 class IR(object):
@@ -22,8 +28,10 @@ class IR(object):
         # inverted index
         self.dict_tf_idf_scores = {}
         self.words_per_file = {}
-        self.max_appearance_per_file = {}
-        self.squared_document_tf_idf_length = {}  # the sum of all the tf-idf ** 2 scores for each word in the file
+        self.max_appearance_per_file = defaultdict(int)
+        # the sum of all the tf-idf ** 2 scores for each word in the file,
+        # its on purpose not a default dict because we are using it to get the number of documents
+        self.squared_document_tf_idf_length = {}
         self.corpus = {}
 
         # nltk classes
@@ -48,56 +56,49 @@ class IR(object):
                     if record_id not in self.squared_document_tf_idf_length:
                         self.squared_document_tf_idf_length[record_id] = 0
 
-            self.words_per_file[record_id] = len(text) # TODO check if it's for the whole text
+            self.words_per_file[record_id] = len(text)  # TODO check if it's for the whole text
             text = self.tokenizer.tokenize(text.lower())  # tokens
             filtered_text = [self.ps.stem(word) for word in text if word not in self.stop_words]  # stopwords + stem
 
-            self.update_dictionary(filtered_text, record_id)
+            self.update_dictionary_count(filtered_text, record_id)
             self.calculate_max_appearances(record_id)
 
-    def update_dictionary(self, text, file_name):
+    def update_dictionary_count(self, text, file_name):
         for word in text:
             if not self.dict_tf_idf_scores.get(word):
                 self.dict_tf_idf_scores[word] = {}
-                self.dict_tf_idf_scores[word][file_name] = {"count": 1, "tf_idf": 0}
+                self.dict_tf_idf_scores[word][file_name] = {COUNT: 1}
             else:
-                if self.dict_tf_idf_scores.get(word, {}).get(file_name):
-                    self.dict_tf_idf_scores[word][file_name]["count"] += 1
+                if self.dict_tf_idf_scores[word].get(file_name):
+                    self.dict_tf_idf_scores[word][file_name][COUNT] += 1
                 else:
-                    self.dict_tf_idf_scores[word][file_name] = {"count": 1, "tf_idf": 0}
+                    self.dict_tf_idf_scores[word][file_name] = {COUNT: 1}
 
     def calculate_max_appearances(self, file_name):
-        self.max_appearance_per_file[file_name] = 0
         for word_map in self.dict_tf_idf_scores.values():
-            count = word_map.get(file_name, {}).get("count", 0)
+            count = word_map.get(file_name, {}).get(COUNT, 0)
             if count > self.max_appearance_per_file[file_name]:
                 self.max_appearance_per_file[file_name] = count
 
-    def calc_tf_idf_score(self, docs_count, avgdl):
+    def calc_tf_idf_score(self):
+        docs_number = len(self.squared_document_tf_idf_length)
         for word in self.dict_tf_idf_scores:
             for file in self.dict_tf_idf_scores[word]:
-                word_frequency = self.dict_tf_idf_scores[word][file].get('count')
+                word_frequency = self.dict_tf_idf_scores[word][file].get(COUNT)
 
                 # compute tf_idf
-                tf = word_frequency / self.max_appearance_per_file.get(file) # TODO check if we want self.words_per_file.get(file)
-                idf = np.log2(docs_count / len(self.dict_tf_idf_scores[word]))
-                self.dict_tf_idf_scores[word][file]["tf_idf"] = tf * idf
+                tf = word_frequency / self.max_appearance_per_file[file] # TODO check if we want self.words_per_file.get(file)
+                idf = np.log2(docs_number / len(self.dict_tf_idf_scores[word]))
+                self.dict_tf_idf_scores[word][file][TFIDF] = tf * idf
                 self.squared_document_tf_idf_length[file] += (tf * idf) ** 2
-
-                # compute bm25
-                bm25 = (idf * word_frequency * (self.K + 1)) / \
-                       (word_frequency + self.K * (1 - self.B + self.B * self.words_per_file.get(file) / avgdl))
-                self.dict_tf_idf_scores[word][file]["bm25"] = bm25
 
     def create_mapping(self, xml_dir_path):
         [self.parse_file(xml_dir_path + "/" + file_name) if file_name.endswith(".xml") else None for file_name in
          os.listdir(xml_dir_path)]
 
-        amount_of_docs = len(self.squared_document_tf_idf_length)
-        avgdl = sum(self.words_per_file.values()) / amount_of_docs
-        self.calc_tf_idf_score(amount_of_docs, avgdl)
+        self.calc_tf_idf_score()
 
-        # norm
+        # calculate squared document tfidf length for cossim normalization
         for file in self.squared_document_tf_idf_length:
             self.squared_document_tf_idf_length[file] = np.sqrt(self.squared_document_tf_idf_length[file])
 
@@ -121,12 +122,15 @@ class IR(object):
         query = self.tokenizer.tokenize(query.lower())  # tokens
         return [self.ps.stem(word) for word in query if word not in self.stop_words]  # stopwords + stem
 
-    def perform_query(self, ranking_func, index_path, query): #TODO add bm25 support
+    def perform_query(self, ranking_func, index_path, query):
         self.load_ir(index_path)
         query = self.normalize_query(query)
-        query_tf_idf = self.calculate_query_tf_idf(query)
-
-        relevant_docs = self.get_ranking(query_tf_idf)
+        if ranking_func == TFIDF:
+            relevant_docs = self.get_tfidf_ranking(query)
+        elif ranking_func == BM25:
+            relevant_docs = self.get_bm25_ranking(query)
+        else:
+            raise("Invalid ranking function: " + ranking_func)
 
         with open(OUTPUT_PATH, "w") as f:
             for i in range(0, len(relevant_docs)):
@@ -141,13 +145,13 @@ class IR(object):
                 for doc in self.dict_tf_idf_scores[word]:
                     if doc not in documents_vectors:
                         documents_vectors[doc] = 0
-
-                    documents_vectors[doc] += (self.dict_tf_idf_scores[word][doc]["tf_idf"] * query_map[word])
+                    documents_vectors[doc] += (self.dict_tf_idf_scores[word][doc][TFIDF] * query_map[word])
 
         return documents_vectors
 
     # Create sorted list of relevant documents by cosSim
-    def get_ranking(self, query_map):
+    def get_tfidf_ranking(self, query):
+        query_map = self.calculate_query_tf_idf(query)
         results = []
 
         # Calc query vector length
@@ -174,13 +178,30 @@ class IR(object):
         max_word_count = max([query.count(word) for word in query])
         for word in set(query):
             tf = (query.count(word) / max_word_count) # TODO query_length = len(query)?
-            n_word = len(self.dict_tf_idf_scores.get(word, {}))  # the number of documents with this word
-            # TODO this is the BM25 idf
-            bm_25_idf = np.log2(((number_of_docs - n_word + 0.5) / (n_word + 0.5)) + 1) \
-                if self.dict_tf_idf_scores.get(word) else 0
-            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores[word])) # number of docs / number of docs the word in
+            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores.get(word, 0))) # number of docs / number of docs the word in
             query_tf_idf[str(word)] = tf * idf
         return query_tf_idf
+
+    # Calculate query's bm25 score.
+    def get_bm25_ranking(self, query):
+        number_of_docs = len(self.squared_document_tf_idf_length)
+        avgdl = sum(self.words_per_file.values()) / number_of_docs
+
+        documents_scores = defaultdict(int)
+        for word in query:
+            n_word = len(self.dict_tf_idf_scores.get(word, {}))  # the number of documents with this word
+            bm25_idf = np.log2(((number_of_docs - n_word + 0.5) / (n_word + 0.5)) + 1) \
+                if self.dict_tf_idf_scores.get(word) else 0
+
+            for doc in self.dict_tf_idf_scores.get(word, {}).keys():
+                word_frequency = self.dict_tf_idf_scores[word][doc][COUNT]
+                bm25_score_for_word = (bm25_idf * word_frequency * (self.K + 1)) / \
+                       (word_frequency + self.K * (1 - self.B + self.B * self.words_per_file[doc] / avgdl))
+                documents_scores[doc] += bm25_score_for_word
+
+        results = documents_scores.values()
+        results.sort(key=lambda x: x[1], reverse=1)
+        return results
 
 
 def main():
