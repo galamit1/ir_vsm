@@ -27,12 +27,11 @@ class IR(object):
     def __init__(self):
         # inverted index
         self.dict_tf_idf_scores = {}
-        self.words_per_file = {}
+        self.words_per_file = defaultdict(int)
         self.max_appearance_per_file = defaultdict(int)
         # the sum of all the tf-idf ** 2 scores for each word in the file,
         # its on purpose not a default dict because we are using it to get the number of documents
         self.squared_document_tf_idf_length = {}
-        self.corpus = {}
 
         # nltk classes
         self.stop_words = set(stopwords.words("english"))
@@ -104,7 +103,9 @@ class IR(object):
 
         # add new dict to corpus
         corpus = {"dictionary": self.dict_tf_idf_scores,
-                  "document_reference": self.squared_document_tf_idf_length}
+                  "squared_document_tf_idf_length": self.squared_document_tf_idf_length,
+                  "words_per_file": self.words_per_file,
+                  "max_appearance_per_file": self.max_appearance_per_file}
 
         with open(INVERTED_INDEX_PATH, "w") as inverted_index_file:
             json.dump(corpus, inverted_index_file, indent=4)
@@ -116,7 +117,9 @@ class IR(object):
             corpus = json.load(inverted_index_file)
 
         self.dict_tf_idf_scores = corpus["dictionary"]
-        self.squared_document_tf_idf_length = corpus["document_reference"]
+        self.squared_document_tf_idf_length = corpus["squared_document_tf_idf_length"]
+        self.words_per_file = corpus["words_per_file"]
+        self.max_appearance_per_file = corpus["max_appearance_per_file"]
 
     def normalize_query(self, query):
         query = self.tokenizer.tokenize(query.lower())  # tokens
@@ -174,11 +177,13 @@ class IR(object):
     # Calculate query's tf-idf score.
     def calculate_query_tf_idf(self, query):
         number_of_docs = len(self.squared_document_tf_idf_length)
-        query_tf_idf = {}
+        query_tf_idf = defaultdict(int)
         max_word_count = max([query.count(word) for word in query])
         for word in set(query):
-            tf = (query.count(word) / max_word_count) # TODO query_length = len(query)?
-            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores.get(word, 0))) # number of docs / number of docs the word in
+            if word not in self.dict_tf_idf_scores:
+                continue
+            tf = (query.count(word) / max_word_count)  # TODO query_length = len(query)?
+            idf = np.log2(number_of_docs / len(self.dict_tf_idf_scores.get(word))) # number of docs / number of docs the word in
             query_tf_idf[str(word)] = tf * idf
         return query_tf_idf
 
@@ -199,7 +204,7 @@ class IR(object):
                        (word_frequency + self.K * (1 - self.B + self.B * self.words_per_file[doc] / avgdl))
                 documents_scores[doc] += bm25_score_for_word
 
-        results = documents_scores.values()
+        results = list(documents_scores.items())
         results.sort(key=lambda x: x[1], reverse=1)
         return results
 
@@ -218,7 +223,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        nltk.download('stopwords')
+        nltk.download('popular', quiet=True)
     except:  # disable SSL check. reference: https://stackoverflow.com/questions/38916452/nltk-download-ssl-certificate-verify-failed
         try:
             _create_unverified_https_context = ssl._create_unverified_context
@@ -226,5 +231,5 @@ if __name__ == '__main__':
             pass
         else:
             ssl._create_default_https_context = _create_unverified_https_context
-        nltk.download('stopwords')
+        nltk.download('popular', quiet=True)
     main()
