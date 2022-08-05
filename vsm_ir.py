@@ -21,7 +21,7 @@ BM25 = "bm25"
 
 class IR(object):
     # bm25 constants
-    K = 1.2
+    K = 1.8
     B = 0.75
 
     def __init__(self):
