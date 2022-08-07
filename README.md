@@ -10,6 +10,7 @@ Afterward, the program calculates more data for the inverted index, for example,
 
 ## Part 2 - Retrieve documents from a query
 `python vsm_ir.py query [ranking] [index_path] “<question>”`
+
 The program calculates the ranking for each document that can be "bm25" or "tf-idf".
 
 In the end, the program saves in "ranked_query_docs.txt" the names of the documents with the highest ranking.
